@@ -11,9 +11,6 @@
 #include <memory>
 using namespace std;
 
-// --------------------------------------------------------------
-// KLASA INSTANCJI
-// --------------------------------------------------------------
 class Instance {
 public:
     int n;
@@ -80,9 +77,6 @@ public:
     int deltaRemove(int prev,int k,int next) const { return dist[prev][k]+dist[k][next]-dist[prev][next]-profit[k]; }
 };
 
-// --------------------------------------------------------------
-// KLASA ROZWIĄZANIA
-// --------------------------------------------------------------
 class Solution {
 public:
     vector<int> cycle;
@@ -113,14 +107,8 @@ public:
     }
 };
 
-// --------------------------------------------------------------
-// KLASA HEURYSTYKI (INTERFEJS)
-// --------------------------------------------------------------
 class Heuristic { public: virtual Solution solve(const Instance& inst)=0; virtual ~Heuristic(){} };
 
-// --------------------------------------------------------------
-// RANDOM HEURYSTYKA (TYLKO LOSOWANIE, BEZ FAZY II)
-// --------------------------------------------------------------
 class RandomSolution: public Heuristic {
 public:
     Solution solve(const Instance& inst) override {
@@ -130,14 +118,11 @@ public:
         int k = 2 + rand()%(inst.n-1);
         sol.cycle.assign(perm.begin(), perm.begin()+k);
         sol.computeStats(inst);
-        sol.lengthPhase1 = sol.length; // zachowujemy długość fazy I
+        sol.lengthPhase1 = sol.length;
         return sol;
     }
 };
 
-// --------------------------------------------------------------
-// NEAREST NEIGHBOR HEURYSTYKA
-// --------------------------------------------------------------
 class NearestNeighbor: public Heuristic {
     bool ignore_profit;
 public:
@@ -160,9 +145,6 @@ public:
     }
 };
 
-// --------------------------------------------------------------
-// GREEDY CYCLE HEURYSTYKA
-// --------------------------------------------------------------
 class GreedyCycle: public Heuristic {
     bool ignore_profit;
 public:
@@ -195,9 +177,6 @@ public:
     }
 };
 
-// --------------------------------------------------------------
-// REGRET2 HEURYSTYKA
-// --------------------------------------------------------------
 class Regret2: public Heuristic {
     bool weighted; double w;
 public:
@@ -236,9 +215,6 @@ public:
     }
 };
 
-// --------------------------------------------------------------
-// ZAPIS STATYSTYK
-// --------------------------------------------------------------
 void makeDir(const string& path){
 #ifdef _WIN32
     system(("_mkdir \"" + path + "\" 2>nul").c_str());
@@ -262,9 +238,6 @@ void saveAllCSV(const string& path, const vector<Solution>& sols){
     }
 }
 
-// --------------------------------------------------------------
-// MAIN
-// --------------------------------------------------------------
 int main(){
     srand(time(NULL));
     bool usePrecomputed=false;
