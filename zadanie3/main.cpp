@@ -742,6 +742,14 @@ private:
 
 
 
+
+
+
+
+
+
+
+
 // RUCHY KANDYDACKIE:
 class LocalSearchWithCandidateMoves : public Heuristic {
     RandomSolution rndSol;
