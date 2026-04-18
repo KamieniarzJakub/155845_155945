@@ -1302,12 +1302,6 @@ int main() {
 
     vector<string> tags = {"A", "B"};
 
-    // -------------------------------------------------------------------------
-    // Zestaw metod do porównania.
-    //
-    // LS_MOVE_LIST_RAND pomijamy na razie, zgodnie z Twoją uwagą.
-    // Candidate moves sprawdzamy dla trzech różnych długości sąsiedztwa.
-    // -------------------------------------------------------------------------
     vector<MethodDef> methods = {
         {"LS_STEEPEST_ESWAP_RAND",      SolverKind::CLASSIC_LS,   NeighType::EDGE_SWAP, LSMode::STEEPEST, true,  0},
         {"LS_MOVE_LIST_RAND", SolverKind::MOVE_LIST_LS, NeighType::EDGE_SWAP, LSMode::STEEPEST, true, 0},
@@ -1332,9 +1326,6 @@ int main() {
         ofstream stats(base + "/stats.csv");
         stats << "method,avg_obj,min_obj,max_obj,avg_time_ms,min_time_ms,max_time_ms\n";
 
-        // ---------------------------------------------------------------------
-        // REGRET2
-        // ---------------------------------------------------------------------
         {
             Regret2 reg;
             BenchmarkResult res = runBenchmark(reg, inst, repetitions);
@@ -1353,9 +1344,6 @@ int main() {
             cerr << "[" << tag << "] REGRET2 done\n";
         }
 
-        // ---------------------------------------------------------------------
-        // Local Search / Candidate Moves
-        // ---------------------------------------------------------------------
         for (const auto& def : methods) {
             unique_ptr<Heuristic> solver = buildSolver(def);
             BenchmarkResult res = runBenchmark(*solver, inst, repetitions);
