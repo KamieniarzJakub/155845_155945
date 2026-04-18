@@ -1,0 +1,285 @@
+Struktury danych
+- Kandydaci[v] — lista numCandidates najbliższych sąsiadów wierzchołka v
+- next[v] — następnik wierzchołka v w aktualnym cyklu
+- prev[v] — poprzednik wierzchołka v w aktualnym cyklu
+- inCycle[v] — informacja, czy wierzchołek v należy do aktualnego cyklu
+- Position[v] — pozycja wierzchołka v w chwilowej linearyzacji cyklu Cykl
+- startVertex — dowolny wierzchołek należący do cyklu, od którego rozpoczynamy linearyzację
+
+
+PROCEDURA PrecomputeCandidateMoves(Instancja, numCandidates)
+    Dla każdego wierzchołka n1 od 0 do Instancja.n - 1:
+        Lista distances = []
+
+        Dla każdego wierzchołka n2 od 0 do Instancja.n - 1:
+            Jeśli n1 ≠ n2:
+                Dodaj parę (Instancja.dist[n1][n2], n2) do distances
+
+        Posortuj distances rosnąco według odległości
+
+        lim = min(numCandidates, liczba elementów distances)
+
+        Kandydaci[n1] = pierwsze lim elementów z distances
+                        (zapamiętujemy tylko numery wierzchołków)
+
+
+PROCEDURA BuildLinkedCycle(Cykl, next, prev, inCycle)
+    Dla każdego wierzchołka v:
+        next[v] = -1
+        prev[v] = -1
+        inCycle[v] = Fałsz
+
+    N = rozmiar(Cykl)
+
+    Dla każdego i od 0 do N - 1:
+        v  = Cykl[i]
+        vn = Cykl[(i + 1) MOD N]
+        vp = Cykl[(i - 1 + N) MOD N]
+
+        next[v] = vn
+        prev[v] = vp
+        inCycle[v] = Prawda
+
+FUNKCJA MaterializeCycle(startVertex, next, cycleSize)
+    Cykl = pusta lista
+    v = startVertex
+
+    Powtórz cycleSize razy:
+        Dodaj v do Cykl
+        v = next[v]
+
+    Zwróć Cykl
+
+PROCEDURA RebuildLinkedCycleFromLinearOrder(Cykl, next, prev)
+    N = rozmiar(Cykl)
+
+    Dla każdego i od 0 do N - 1:
+        v = Cykl[i]
+        next[v] = Cykl[(i + 1) MOD N]
+        prev[v] = Cykl[(i - 1 + N) MOD N]
+
+PROCEDURA InsertBetween(left, right, v, next, prev, inCycle)
+    next[left] = v
+    prev[v] = left
+
+    next[v] = right
+    prev[right] = v
+
+    inCycle[v] = Prawda
+
+PROCEDURA RemoveVertex(v, next, prev, inCycle)
+    left = prev[v]
+    right = next[v]
+
+    next[left] = right
+    prev[right] = left
+
+    next[v] = -1
+    prev[v] = -1
+    inCycle[v] = Fałsz
+
+ROCEDURA ReverseSubpath(Cykl, start, end)
+    Jeśli start <= end:
+        Odwróć kolejność elementów w Cykl od start do end
+    W przeciwnym wypadku:
+        Temp = []
+
+        Dla k od start do rozmiaru(Cykl) - 1:
+            Dodaj Cykl[k] do Temp
+
+        Dla k od 0 do end:
+            Dodaj Cykl[k] do Temp
+
+        Odwróć Temp
+
+        idx = 0
+
+        Dla k od start do rozmiaru(Cykl) - 1:
+            Cykl[k] = Temp[idx]
+            idx = idx + 1
+
+        Dla k od 0 do end:
+            Cykl[k] = Temp[idx]
+            idx = idx + 1
+
+
+FUNKCJA Solve(Instancja)
+    // 1. Inicjalizacja list kandydackich
+    Jeśli Kandydaci są empty
+    lub ich rozmiar ≠ Instancja.n
+    lub cachedNumCandidates ≠ numCandidates:
+        PrecomputeCandidateMoves(Instancja, numCandidates)
+        cachedNumCandidates = numCandidates
+
+    // 2. Rozwiązanie początkowe
+    Sol = GenerujLosoweRozwiązanie(Instancja)
+
+    Jeśli Sol.cycle jest pusty:
+        Oblicz statystyki Sol
+        Zwróć Sol
+
+    // 3. Reprezentacja cyklu jako lista dwukierunkowa
+    Utwórz tablice next, prev, inCycle
+    BuildLinkedCycle(Sol.cycle, next, prev, inCycle)
+
+    startVertex = Sol.cycle[0]
+    cycleSize = rozmiar(Sol.cycle)
+
+    Position = tablica rozmiaru Instancja.n wypełniona -1
+
+    Improved = Prawda
+
+    Dopóki Improved == Prawda:
+        Improved = Fałsz
+
+        BestDelta = 0
+        BestType = NONE
+        BestI = -1
+        BestJorV = -1
+
+        // 4. Budowa chwilowej linearyzacji aktualnego cyklu
+        Cykl = MaterializeCycle(startVertex, next, cycleSize)
+        N = rozmiar(Cykl)
+
+        Dla każdego i od 0 do N - 1:
+            Position[Cykl[i]] = i
+
+        // --- PRZEGLĄD RUCHÓW KANDYDACKICH ---
+        Dla każdego i od 0 do N - 1:
+            n1 = Cykl[i]
+            n1_next = Cykl[(i + 1) MOD N]
+            n1_prev = Cykl[(i - 1 + N) MOD N]
+
+            Dla każdego n2 z Kandydaci[n1]:
+                Jeśli inCycle[n2] == Prawda:
+                    j = Position[n2]
+                W przeciwnym wypadku:
+                    j = -1
+
+                Jeśli j != -1:
+                    // --------------------------------------------
+                    // RUCHY WEWNĄTRZTRASOWE
+                    // --------------------------------------------
+                    Jeśli i == j LUB i == (j + 1) MOD N LUB j == (i + 1) MOD N:
+                        Kontynuuj
+
+                    n2_next = Cykl[(j + 1) MOD N]
+                    n2_prev = Cykl[(j - 1 + N) MOD N]
+
+                    // INTRA_1:
+                    // odwrócenie fragmentu od n1_next do n2_prev
+                    Delta1 =
+                        (dist[n1][n1_next] + dist[n2_prev][n2]) -
+                        (dist[n1][n2_prev] + dist[n1_next][n2])
+
+                    Jeśli Delta1 > BestDelta:
+                        BestDelta = Delta1
+                        BestType = INTRA_1
+                        BestI = i
+                        BestJorV = j
+
+                    // INTRA_2:
+                    // odwrócenie fragmentu od n1 do n2
+                    Delta2 =
+                        (dist[n1_prev][n1] + dist[n2][n2_next]) -
+                        (dist[n1_prev][n2] + dist[n1][n2_next])
+
+                    Jeśli Delta2 > BestDelta:
+                        BestDelta = Delta2
+                        BestType = INTRA_2
+                        BestI = i
+                        BestJorV = j
+
+                W przeciwnym wypadku:
+                    // --------------------------------------------
+                    // RUCHY MIĘDZYTRASOWE (ADD)
+                    // --------------------------------------------
+
+                    // ADD_NEXT:
+                    // wstawienie n2 pomiędzy n1 i n1_next
+                    DeltaAddNext =
+                        Profit[n2] - (dist[n1][n2] + dist[n2][n1_next] - dist[n1][n1_next])
+
+                    Jeśli DeltaAddNext > BestDelta:
+                        BestDelta = DeltaAddNext
+                        BestType = ADD_NEXT
+                        BestI = i
+                        BestJorV = n2
+
+                    // ADD_PREV:
+                    // wstawienie n2 pomiędzy n1_prev i n1
+                    DeltaAddPrev =
+                        Profit[n2] - (dist[n1_prev][n2] + dist[n2][n1] - dist[n1_prev][n1])
+
+                    Jeśli DeltaAddPrev > BestDelta:
+                        BestDelta = DeltaAddPrev
+                        BestType = ADD_PREV
+                        BestI = i
+                        BestJorV = n2
+
+        // --- PRZEGLĄD RUCHÓW USUWANIA (REMOVE) ---
+        Jeśli N > 2:
+            Dla każdego idx od 0 do N - 1:
+                v = Cykl[idx]
+                prev_v = Cykl[(idx - 1 + N) MOD N]
+                next_v = Cykl[(idx + 1) MOD N]
+
+                DeltaRem =
+                    (dist[prev_v][v] + dist[v][next_v] - dist[prev_v][next_v]) - Profit[v]
+
+                Jeśli DeltaRem > BestDelta:
+                    BestDelta = DeltaRem
+                    BestType = REMOVE
+                    BestI = idx
+
+        // --- APLIKACJA NAJLEPSZEGO RUCHU ---
+        Jeśli BestDelta > 0:
+            Improved = Prawda
+
+            Jeśli BestType == INTRA_1:
+                start_rev = (BestI + 1) MOD N
+                end_rev = (BestJorV - 1 + N) MOD N
+
+                ReverseSubpath(Cykl, start_rev, end_rev)
+                RebuildLinkedCycleFromLinearOrder(Cykl, next, prev)
+                startVertex = Cykl[0]
+
+            W przeciwnym wypadku jeśli BestType == INTRA_2:
+                ReverseSubpath(Cykl, BestI, BestJorV)
+                RebuildLinkedCycleFromLinearOrder(Cykl, next, prev)
+                startVertex = Cykl[0]
+
+            W przeciwnym wypadku jeśli BestType == ADD_NEXT:
+                n1 = Cykl[BestI]
+                old_next = next[n1]
+                v = BestJorV
+
+                InsertBetween(n1, old_next, v, next, prev, inCycle)
+                cycleSize = cycleSize + 1
+
+            W przeciwnym wypadku jeśli BestType == ADD_PREV:
+                n1 = Cykl[BestI]
+                old_prev = prev[n1]
+                v = BestJorV
+
+                InsertBetween(old_prev, n1, v, next, prev, inCycle)
+                cycleSize = cycleSize + 1
+
+                Jeśli n1 == startVertex:
+                    startVertex = v
+
+            W przeciwnym wypadku jeśli BestType == REMOVE:
+                v = Cykl[BestI]
+                successor = next[v]
+
+                RemoveVertex(v, next, prev, inCycle)
+                cycleSize = cycleSize - 1
+
+                Jeśli v == startVertex:
+                    startVertex = successor
+
+    // 5. Odtworzenie końcowego rozwiązania
+    Sol.cycle = MaterializeCycle(startVertex, next, cycleSize)
+    Oblicz statystyki Sol
+
+    Zwróć Sol

@@ -11,6 +11,7 @@
 #include <memory>
 #include <chrono>
 #include <climits>
+#include <queue>
 using namespace std;
 
 mt19937 rng(random_device{}());
@@ -171,67 +172,6 @@ public:
 };
 
 
-class RandomWalk : public Heuristic {
-    double timeLimitSeconds;
-    RandomSolution rndSol;
-
-public:
-    RandomWalk(double tl=1.0) : timeLimitSeconds(tl) {}
-
-    void setTimeLimit(double tl) { timeLimitSeconds = tl; }
-
-    Solution solve(const Instance& inst) override {
-        Solution sol = rndSol.solve(inst);
-        Solution best = sol;
-
-        auto start = chrono::steady_clock::now();
-        while(true) {
-            auto now = chrono::steady_clock::now();
-            double elapsed = chrono::duration<double>(now-start).count();
-            if(elapsed >= timeLimitSeconds) break;
-
-            vector<int>& cyc = sol.cycle;
-            int n = cyc.size();
-            vector<bool> inCycle(inst.n, false);
-            for(int v : cyc) inCycle[v] = true;
-
-            int mtype = uniform_int_distribution<int>(0,2)(rng);
-            if(mtype==0) {
-                vector<int> outside;
-                for(int v=0;v<inst.n;v++) if(!inCycle[v]) outside.push_back(v);
-                if(outside.empty()) { mtype=1; }
-                else {
-                    int v = outside[uniform_int_distribution<int>(0,(int)outside.size()-1)(rng)];
-                    int pos = uniform_int_distribution<int>(0,n-1)(rng);
-                    cyc.insert(cyc.begin()+pos, v);
-                    sol.computeStats(inst);
-                }
-            }
-            if(mtype==1) {
-                if(n<=2) continue;
-                int idx = uniform_int_distribution<int>(0,n-1)(rng);
-                cyc.erase(cyc.begin()+idx);
-                sol.computeStats(inst);
-            } else if(mtype==2) {
-                if(n<4) continue;
-                int i = uniform_int_distribution<int>(0,n-1)(rng);
-                int j = uniform_int_distribution<int>(0,n-1)(rng);
-                if(i==j) continue;
-                if(i>j) swap(i,j);
-                if(uniform_int_distribution<int>(0,1)(rng)==0) swap(cyc[i],cyc[j]);
-                else {
-                    if(i==0 && j==n-1) continue;
-                    int l=i+1,r=j;
-                    while(l<r){swap(cyc[l],cyc[r]);l++;r--;}
-                }
-                sol.computeStats(inst);
-            }
-
-            if(sol.objective() > best.objective()) best = sol;
-        }
-        return best;
-    }
-};
 
 class LocalSearch : public Heuristic {
     NeighType neighType;
@@ -499,252 +439,428 @@ void greedy(const Instance& inst, Solution& sol) {
 }
 };
 
+
+
+
+
+
+//MOVE LIST
 class LocalSearchWithMoveList : public Heuristic {
-    NeighType neighType;
-    LSMode mode;
-    bool startRandom;
     RandomSolution rndSol;
-    vector<pair<int, vector<int>>> moveList; // lista ruchów (ocenionych wcześniej)
+
+    enum class MoveType {
+        ADD,        // dodanie wierzchołka spoza cyklu
+        REMOVE,     // usunięcie wierzchołka z cyklu
+        EDGE_SWAP   // ruch wewnątrztrasowy typu 2-opt (wymiana dwóch krawędzi)
+    };
+
+    // - ADD:       a = left,  b = right, c = v
+    // - REMOVE:    a = left,  b = v,     c = right
+    // - EDGE_SWAP: a = a,     b = b,     c = c, d = d
+    struct Move {
+        int delta;
+        MoveType type;
+        int a, b, c, d;
+    };
+
+    enum class EdgeSwapApplicability {
+        NOT_APPLICABLE, // przynajmniej jedna usuwana krawędź już nie występuje
+        FORWARD,        // obie usuwane krawędzie występują w zapamiętanym kierunku
+        REVERSED        // obie usuwane krawędzie występują jednocześnie odwrócone
+    };
+
+    // Lista ruchów poprawiających, posortowana od najgorszego do najlepszego.
+    // Dzięki temu najlepszy ruch jest na końcu i można go pobierać przez pop_back().
+    vector<Move> moveList;
 
 public:
-    LocalSearchWithMoveList(NeighType nt, LSMode lm, bool sr)
-        : neighType(nt), mode(lm), startRandom(sr) {}
+    LocalSearchWithMoveList() {}
 
     Solution solve(const Instance& inst) override {
-        Solution sol = startRandom ? rndSol.solve(inst) : solveWithMoveList(inst);
-        localSearch(inst, sol);
+        Solution sol = rndSol.solve(inst);
+        if (sol.cycle.empty()) {
+            sol.computeStats(inst);
+            return sol;
+        }
+
+        // Reprezentacja cyklu:
+        // next[v]    - następnik wierzchołka v w cyklu
+        // prev[v]    - poprzednik wierzchołka v w cyklu
+        // inCycle[v] - czy wierzchołek v należy do cyklu
+        vector<int> next(inst.n, -1);
+        vector<int> prev(inst.n, -1);
+        vector<char> inCycle(inst.n, 0);
+
+        buildLinkedCycle(sol.cycle, next, prev, inCycle);
+        int startVertex = sol.cycle[0];
+        int cycleSize = (int)sol.cycle.size();
+        buildImprovingMoveList(inst, next, prev, inCycle, startVertex, cycleSize, moveList);
+
+        // Alternatywna wersja z wykładu:
+        // 1. Dopóki istnieje aplikowalny ruch na liście LM, próbujemy go znaleźć.
+        // 2. Jeżeli lista się wyczerpie, budujemy ją ponownie od zera.
+        // 3. Kończymy, gdy po pełnym przeglądzie nowa LM jest pusta.
+        while (true) {
+            bool applied = false;
+
+            while (!moveList.empty()) {
+                Move m = moveList.back();
+                moveList.pop_back();
+
+                // Ruch nie jest już aplikowalny do bieżącego rozwiązania
+                if (!isApplicable(m, next, prev, inCycle)) {
+                    continue;
+                }
+
+                // Znaleziono ruch aplikowalny
+                applyMove(m, inst, next, prev, inCycle, startVertex, cycleSize);
+                applied = true;
+                break;
+            }
+
+            // Jeżeli nie znaleziono żadnego ruchu aplikowalnego,
+            // budujemy nową listę ruchów dla bieżącego rozwiązania
+            if (!applied) {
+                buildImprovingMoveList(inst, next, prev, inCycle, startVertex, cycleSize, moveList);
+
+                // Brak ruchów poprawiających => osiągnięto lokalne optimum
+                if (moveList.empty()) {
+                    break;
+                }
+            }
+        }
+
+        sol.cycle = materializeCycle(startVertex, next, cycleSize);
+        sol.computeStats(inst);
+
         return sol;
     }
 
 private:
-    void localSearch(const Instance& inst, Solution& sol) {
-        if(mode == LSMode::STEEPEST)
-            steepest(inst, sol);
-        else
-            greedy(inst, sol);
-        sol.computeStats(inst);
+    // Buduje reprezentację next / prev / inCycle na podstawie cyklu
+    // zapisanego jako wektor.
+    void buildLinkedCycle(const vector<int>& cyc,
+                          vector<int>& next,
+                          vector<int>& prev,
+                          vector<char>& inCycle) {
+        fill(next.begin(), next.end(), -1);
+        fill(prev.begin(), prev.end(), -1);
+        fill(inCycle.begin(), inCycle.end(), 0);
+
+        int n = (int)cyc.size();
+        for (int i = 0; i < n; i++) {
+            int v = cyc[i];
+            int vn = cyc[(i + 1) % n];
+            int vp = cyc[(i - 1 + n) % n];
+
+            next[v] = vn;
+            prev[v] = vp;
+            inCycle[v] = 1;
+        }
     }
 
-    Solution solveWithMoveList(const Instance& inst) {
-        Solution sol = rndSol.solve(inst);
-        vector<int>& cyc = sol.cycle;
-        moveList.clear();  // Inicjalizujemy pustą listę ruchów
+    vector<int> materializeCycle(int startVertex,
+                                 const vector<int>& next,
+                                 int cycleSize) {
+        vector<int> cyc;
+        cyc.reserve(cycleSize);
 
-        // Zbieramy wszystkie ruchy aplikowalne do cyklu i dodajemy je do listy
-        for(int i = 0; i < inst.n; i++) {
-            for(int j = 0; j < cyc.size(); j++) {
-                int d = inst.deltaInsert(cyc[i], cyc[j], i);
-                if(d > 0) { // dodajemy tylko ruchy, które przynoszą poprawę
-                    moveList.push_back({d, {i, j}});
+        int v = startVertex;
+        for (int step = 0; step < cycleSize; step++) {
+            cyc.push_back(v);
+            v = next[v];
+        }
+
+        return cyc;
+    }
+
+    void rebuildLinkedCycleFromLinearOrder(const vector<int>& cyc,
+                                           vector<int>& next,
+                                           vector<int>& prev) {
+        int n = (int)cyc.size();
+        for (int i = 0; i < n; i++) {
+            int v = cyc[i];
+            next[v] = cyc[(i + 1) % n];
+            prev[v] = cyc[(i - 1 + n) % n];
+        }
+    }
+
+    // Wstawienie v pomiędzy left i right.
+    // Przed operacją:
+    // left -> right
+    // Po operacji:
+    // left -> v -> right
+    void insertBetween(int left, int right, int v,
+                       vector<int>& next,
+                       vector<int>& prev,
+                       vector<char>& inCycle) {
+        next[left] = v;
+        prev[v] = left;
+
+        next[v] = right;
+        prev[right] = v;
+
+        inCycle[v] = 1;
+    }
+
+    // Usunięcie v z cyklu.
+    // Przed operacją:
+    // left -> v -> right
+    // Po operacji:
+    // left -> right
+    void removeVertex(int v,
+                      vector<int>& next,
+                      vector<int>& prev,
+                      vector<char>& inCycle) {
+        int left = prev[v];
+        int right = next[v];
+
+        next[left] = right;
+        prev[right] = left;
+
+        next[v] = -1;
+        prev[v] = -1;
+        inCycle[v] = 0;
+    }
+
+    // Odwrócenie fragmentu cyklu w linearyzacji.
+    // Obsługuje również przypadek zawijania przez koniec wektora.
+    void reverseSubpath(vector<int>& cyc, int start, int end) {
+        int n = (int)cyc.size();
+
+        if (start <= end) {
+            reverse(cyc.begin() + start, cyc.begin() + end + 1);
+        } else {
+            vector<int> temp;
+            temp.reserve(n - start + end + 1);
+
+            for (int k = start; k < n; k++) temp.push_back(cyc[k]);
+            for (int k = 0; k <= end; k++) temp.push_back(cyc[k]);
+
+            reverse(temp.begin(), temp.end());
+
+            int idx = 0;
+            for (int k = start; k < n; k++) cyc[k] = temp[idx++];
+            for (int k = 0; k <= end; k++) cyc[k] = temp[idx++];
+        }
+    }
+
+    // Buduje listę wszystkich ruchów poprawiających aplikowalnych do bieżącego rozwiązania.
+    // Lista jest sortowana rosnąco po delta, aby najlepszy ruch znajdował się na końcu
+    void buildImprovingMoveList(const Instance& inst,
+                                const vector<int>& next,
+                                const vector<int>& prev,
+                                const vector<char>& inCycle,
+                                int startVertex,
+                                int cycleSize,
+                                vector<Move>& lm) {
+        lm.clear();
+
+        vector<int> cyc = materializeCycle(startVertex, next, cycleSize);
+        int n = (int)cyc.size();
+
+        vector<int> position(inst.n, -1);
+        for (int i = 0; i < n; i++) {
+            position[cyc[i]] = i;
+        }
+
+        // RUCHY MIĘDZYTRASOWE: ADD
+        // Dla każdego wierzchołka spoza cyklu sprawdzamy wszystkie możliwe pozycje wstawienia.
+        vector<int> outside;
+        outside.reserve(inst.n - n);
+
+        for (int v = 0; v < inst.n; v++) {
+            if (!inCycle[v]) outside.push_back(v);
+        }
+
+        for (int i = 0; i < n; i++) {
+            int left = cyc[i];
+            int right = cyc[(i + 1) % n];
+
+            for (int v : outside) {
+                int delta = inst.profit[v] - inst.deltaInsert(left, right, v);
+                if (delta > 0) {
+                    lm.push_back({delta, MoveType::ADD, left, right, v, -1});
                 }
             }
         }
 
-        // Sortujemy listę ruchów według oceny (od najlepszych do najgorszych)
-        sort(moveList.begin(), moveList.end(), greater<>());
+        // RUCHY MIĘDZYTRASOWE: REMOVE
+        if (n > 2) {
+            for (int idx = 0; idx < n; idx++) {
+                int left = cyc[(idx - 1 + n) % n];
+                int v = cyc[idx];
+                int right = cyc[(idx + 1) % n];
 
-        return sol;
-    }
-
-    void steepest(const Instance& inst, Solution& sol) {
-        bool improved = true;
-        while(improved) {
-            vector<int>& cyc = sol.cycle;
-            improved = false;
-            int bestDelta = 0;
-            int bestType = -1;
-            int bestI = -1, bestJ = -1, bestV = -1, bestPos = -1;
-
-            // Przeglądanie listy ruchów od najlepszych do najgorszych
-            for (auto& move : moveList) {
-                int delta = move.first;
-                if (delta > bestDelta) {
-                    bestDelta = delta;
-                    bestV = move.second[0]; // Wartość ruchu
-                    bestPos = move.second[1];
-                    improved = true;
-                }
-            }
-
-            if(bestDelta > 0) {
-                // Wykonanie ruchu
-                cyc.insert(cyc.begin() + bestPos, bestV);
-                sol.computeStats(inst);
-            }
-        }
-    }
-
-    void greedy(const Instance& inst, Solution& sol) {
-        bool improved = true;
-        while (improved) {
-            improved = false;
-
-            vector<int>& cyc = sol.cycle;
-            int n = cyc.size();
-
-            vector<bool> inCycle(inst.n, false);
-            for (int v : cyc) inCycle[v] = true;
-
-            vector<int> outside;
-            for (int v = 0; v < inst.n; v++) if (!inCycle[v]) outside.push_back(v);
-            shuffle(outside.begin(), outside.end(), rng);
-
-            vector<int> cycleIndices(n);
-            iota(cycleIndices.begin(), cycleIndices.end(), 0);
-            shuffle(cycleIndices.begin(), cycleIndices.end(), rng);
-
-            vector<int> moves = {0, 1, 2};
-            shuffle(moves.begin(), moves.end(), rng);
-
-            for (int move : moves) {
-                if (improved) break;
-
-                if (move == 0) { // ADD
-                    for (int v : outside) {
-                        if (improved) break;
-                        for (int i : cycleIndices) {
-                            int j = (i + 1) % n;
-                            int d = inst.profit[v] - inst.deltaInsert(cyc[i], cyc[j], v);
-                            if (d > 0) { 
-                                applyAdd(sol, inst, cyc, v, j); 
-                                improved = true; 
-                                break; 
-                            }
-                        }
-                    }
-                }
-                else if (move == 1 && n > 2) { // REMOVE
-                    for (int idx : cycleIndices) {
-                        int d = deltaRem(inst, cyc, idx);
-                        if (d > 0) { 
-                            applyRemove(sol, inst, cyc, idx); 
-                            improved = true; 
-                            break; 
-                        }
-                    }
-                }
-                else if (move == 2) { // INTRA
-                    for (int i : cycleIndices) {
-                        if (improved) break;
-                        // Ponieważ i oraz j biorą się z przetasowanej listy, 
-                        // sprawdzamy pary w całkowicie losowej kolejności
-                        for (int j : cycleIndices) {
-                            if (i >= j) continue; // Zapewnia brak duplikatów (a < b) i omija i == j
-
-                            if (neighType == NeighType::VERTEX_SWAP) {
-                                int d = deltaVertexSwap(inst, cyc, i, j);
-                                if (d > 0) { 
-                                    applyVertexSwap(sol, inst, cyc, i, j); 
-                                    improved = true; 
-                                    break; 
-                                }
-                            } else {
-                                if (i == 0 && j == n - 1) continue;
-                                if (j < i + 2) continue; // Ignorujemy sąsiadujące krawędzie
-                                int d = deltaEdgeSwap(inst, cyc, i, j);
-                                if (d > 0) { 
-                                    applyEdgeSwap(sol, inst, cyc, i, j); 
-                                    improved = true; 
-                                    break; 
-                                }
-                            }
-                        }
-                    }
+                int delta = inst.deltaRemove(left, v, right);
+                if (delta > 0) {
+                    lm.push_back({delta, MoveType::REMOVE, left, v, right, -1});
                 }
             }
         }
-    }
 
-    // Funkcje pomocnicze (applyAdd, applyRemove, deltaRem, deltaVertexSwap, applyVertexSwap, deltaEdgeSwap, applyEdgeSwap)
-    void applyAdd(Solution& sol, const Instance& inst, vector<int>& cyc, int v, int pos) {
-        int n = cyc.size();
-        int prev_v = cyc[(pos - 1 + n) % n];
-        int next_v = cyc[pos % n];
-        sol.length    += inst.deltaInsert(prev_v, next_v, v);
-        sol.profitSum += inst.profit[v];
-        cyc.insert(cyc.begin() + pos, v);
-    }
+        // RUCHY WEWNĄTRZTRASOWE: EDGE_SWAP (2-opt)
+        // Używamy sąsiedztwa wymiany dwóch krawędzi.
+        for (int i = 0; i < n - 1; i++) {
+            for (int j = i + 2; j < n; j++) {
+                // Pomijamy krawędzie sąsiednie cyklicznie
+                if (i == 0 && j == n - 1) continue;
 
-    int deltaRem(const Instance& inst, const vector<int>& cyc, int idx) const {
-        int n = cyc.size();
-        int prev_v = cyc[(idx-1+n)%n];
-        int next_v = cyc[(idx+1)%n];
-        int k = cyc[idx];
-        return inst.deltaRemove(prev_v, k, next_v);
-    }
+                int a = cyc[i];
+                int b = cyc[(i + 1) % n];
+                int c = cyc[j];
+                int d = cyc[(j + 1) % n];
 
-    void applyRemove(Solution& sol, const Instance& inst, vector<int>& cyc, int idx) {
-        int n = cyc.size();
-        int prev_v = cyc[(idx - 1 + n) % n];
-        int next_v = cyc[(idx + 1) % n];
-        int k    = cyc[idx];
-        sol.length    -= (inst.dist[prev_v][k] + inst.dist[k][next_v] - inst.dist[prev_v][next_v]);
-        sol.profitSum -= inst.profit[k];
-        cyc.erase(cyc.begin() + idx);
-    }
+                int delta =
+                    inst.dist[a][b] + inst.dist[c][d] -
+                    inst.dist[a][c] - inst.dist[b][d];
 
-    int deltaVertexSwap(const Instance& inst, const vector<int>& cyc, int i, int j) const {
-        int n = cyc.size();
-        if(n < 3 || i == j) return 0;
-
-        int im1 = (i - 1 + n) % n;
-        int ip1 = (i + 1) % n;
-        int jm1 = (j - 1 + n) % n;
-        int jp1 = (j + 1) % n;
-
-        int vi = cyc[i];
-        int vj = cyc[j];
-
-        // sąsiedzi (i przed j)
-        if(ip1 == j) {
-            int oldCost = inst.dist[cyc[im1]][vi] + inst.dist[vi][vj] + inst.dist[vj][cyc[jp1]];
-            int newCost = inst.dist[cyc[im1]][vj] + inst.dist[vj][vi] + inst.dist[vi][cyc[jp1]];
-            return oldCost - newCost;
+                if (delta > 0) {
+                    lm.push_back({delta, MoveType::EDGE_SWAP, a, b, c, d});
+                }
+            }
         }
 
-        // sąsiedzi cykliczni (j przed i)
-        if(jp1 == i) {
-            int oldCost = inst.dist[cyc[jm1]][vj] + inst.dist[vj][vi] + inst.dist[vi][cyc[ip1]];
-            int newCost = inst.dist[cyc[jm1]][vi] + inst.dist[vi][vj] + inst.dist[vj][cyc[ip1]];
-            return oldCost - newCost;
+        // Najlepszy ruch będzie na końcu
+        sort(lm.begin(), lm.end(),
+             [](const Move& lhs, const Move& rhs) {
+                 if (lhs.delta != rhs.delta) return lhs.delta < rhs.delta;
+                 return (int)lhs.type < (int)rhs.type;
+             });
+    }
+
+    // Sprawdzenie aplikowalności ruchu.
+    //
+    // Dla EDGE_SWAP dopuszczamy trzy sytuacje:
+    // - NOT_APPLICABLE:
+    //   przynajmniej jednej z usuwanych krawędzi nie ma już w rozwiązaniu
+    // - FORWARD:
+    //   obie usuwane krawędzie występują dokładnie w zapisanym kierunku
+    // - REVERSED:
+    //   obie usuwane krawędzie występują jednocześnie w kierunku odwróconym
+    bool isApplicable(const Move& m,
+                      const vector<int>& next,
+                      const vector<int>& prev,
+                      const vector<char>& inCycle) const {
+        if (m.type == MoveType::ADD) {
+            int left = m.a;
+            int right = m.b;
+            int v = m.c;
+
+            return (!inCycle[v] && next[left] == right);
         }
 
-        // ogólny przypadek
-        int oldCost = inst.dist[cyc[im1]][vi] + inst.dist[vi][cyc[ip1]]
-                    + inst.dist[cyc[jm1]][vj] + inst.dist[vj][cyc[jp1]];
+        if (m.type == MoveType::REMOVE) {
+            int left = m.a;
+            int v = m.b;
+            int right = m.c;
 
-        int newCost = inst.dist[cyc[im1]][vj] + inst.dist[vj][cyc[ip1]]
-                    + inst.dist[cyc[jm1]][vi] + inst.dist[vi][cyc[jp1]];
+            return (inCycle[v] && prev[v] == left && next[v] == right);
+        }
 
-        return oldCost - newCost;
+        return getEdgeSwapApplicability(m, next) != EdgeSwapApplicability::NOT_APPLICABLE;
     }
 
-    void applyVertexSwap(Solution& sol, const Instance& inst, vector<int>& cyc, int i, int j) {
-        sol.length -= deltaVertexSwap(inst, cyc, i, j);
-        swap(cyc[i], cyc[j]);
+    // Określa, czy EDGE_SWAP jest aplikowalny:
+    // - FORWARD  : krawędzie (a,b) i (c,d) istnieją w tym kierunku
+    // - REVERSED : krawędzie istnieją obie odwrócone: (b,a) i (d,c)
+    // - NOT_APPLICABLE : w przeciwnym razie
+    EdgeSwapApplicability getEdgeSwapApplicability(const Move& m,
+                                                   const vector<int>& next) const {
+        int a = m.a, b = m.b, c = m.c, d = m.d;
+
+        if (next[a] == b && next[c] == d) {
+            return EdgeSwapApplicability::FORWARD;
+        }
+
+        if (next[b] == a && next[d] == c) {
+            return EdgeSwapApplicability::REVERSED;
+        }
+
+        return EdgeSwapApplicability::NOT_APPLICABLE;
     }
 
-    int deltaEdgeSwap(const Instance& inst, const vector<int>& cyc, int i, int j) const {
-        int n = cyc.size();
-        int a = cyc[i], b = cyc[(i+1)%n];
-        int c = cyc[j], d = cyc[(j+1)%n];
-        return inst.dist[a][b] + inst.dist[c][d]
-             - inst.dist[a][c] - inst.dist[b][d];
+    void applyMove(const Move& m,
+                   const Instance& inst,
+                   vector<int>& next,
+                   vector<int>& prev,
+                   vector<char>& inCycle,
+                   int& startVertex,
+                   int& cycleSize) {
+        if (m.type == MoveType::ADD) {
+            int left = m.a;
+            int right = m.b;
+            int v = m.c;
+
+            insertBetween(left, right, v, next, prev, inCycle);
+            cycleSize++;
+            return;
+        }
+
+        if (m.type == MoveType::REMOVE) {
+            int v = m.b;
+            int right = m.c;
+
+            removeVertex(v, next, prev, inCycle);
+            cycleSize--;
+
+            // Jeśli usunięto wierzchołek startowy, przechodzimy na jego następnika
+            if (v == startVertex) {
+                startVertex = right;
+            }
+            return;
+        }
+
+        applyEdgeSwapMove(m, next, prev, startVertex, cycleSize);
     }
 
-    void applyEdgeSwap(Solution& sol, const Instance& inst, vector<int>& cyc, int i, int j) {
-        sol.length -= deltaEdgeSwap(inst, cyc, i, j);
-        int n = cyc.size();
-        int l = (i+1)%n, r = j;
-        while(l < r) { swap(cyc[l], cyc[r]); l++; r--; }
+    // Aplikacja ruchu EDGE_SWAP.
+    //
+    // Operujemy na chwilowej linearyzacji cyklu, wykonujemy odwrócenie
+    // odpowiedniego fragmentu, a następnie odbudowujemy next / prev.
+    void applyEdgeSwapMove(const Move& m,
+                           vector<int>& next,
+                           vector<int>& prev,
+                           int& startVertex,
+                           int cycleSize) {
+        vector<int> cyc = materializeCycle(startVertex, next, cycleSize);
+        int n = (int)cyc.size();
+
+        vector<int> position(next.size(), -1);
+        for (int i = 0; i < n; i++) {
+            position[cyc[i]] = i;
+        }
+
+        EdgeSwapApplicability state = getEdgeSwapApplicability(m, next);
+        if (state == EdgeSwapApplicability::NOT_APPLICABLE) {
+            return;
+        }
+
+        int start_rev, end_rev;
+
+        if (state == EdgeSwapApplicability::FORWARD) {
+            // Usuwamy krawędzie (a,b) i (c,d),
+            // odwracamy fragment od b do c.
+            int i = position[m.a];
+            int j = position[m.c];
+
+            start_rev = (i + 1) % n;
+            end_rev = j;
+        } else {
+            // Usuwane krawędzie występują jako (b,a) i (d,c),
+            // odwracamy fragment od a do d.
+            int i = position[m.b];
+            int j = position[m.d];
+
+            start_rev = (i + 1) % n;
+            end_rev = j;
+        }
+
+        reverseSubpath(cyc, start_rev, end_rev);
+        rebuildLinkedCycleFromLinearOrder(cyc, next, prev);
+        startVertex = cyc[0];
     }
 };
-
-
-
-
-
-
 
 
 
@@ -753,55 +869,319 @@ private:
 // RUCHY KANDYDACKIE:
 class LocalSearchWithCandidateMoves : public Heuristic {
     RandomSolution rndSol;
-    vector<pair<int, pair<int, int>>> candidateMoves; // Lista kandydatów (delta, wierzchołki)
+    vector<vector<int>> candidateNearestNeighbors;
+    int numCandidates;
+    int cachedNumCandidates;
+
+    enum class MoveType { NONE, INTRA_1, INTRA_2, ADD_NEXT, ADD_PREV, REMOVE };
 
 public:
-    LocalSearchWithCandidateMoves() {}
+    explicit LocalSearchWithCandidateMoves(int numCandidates_ = 10)
+        : numCandidates(max(1, numCandidates_)), cachedNumCandidates(-1) {}
 
-    Solution solve(const Instance& inst) override {
-        Solution sol = rndSol.solve(inst);
-        vector<int>& cyc = sol.cycle;
-        candidateMoves.clear();  // Inicjalizujemy pustą listę ruchów kandydackich
+    void precomputeCandidateMoves(const Instance& inst, int numCandidates) {
+        candidateNearestNeighbors.assign(inst.n, vector<int>());
 
-        // Zbieramy ruchy kandydackie
         for (int n1 = 0; n1 < inst.n; n1++) {
-            // Generujemy 10 najbliższych sąsiadów wierzchołka n1
-            vector<pair<int, int>> closestNeighbors;
+            vector<pair<int, int>> distances;
+            distances.reserve(inst.n - 1);
+
             for (int n2 = 0; n2 < inst.n; n2++) {
                 if (n1 != n2) {
-                    closestNeighbors.push_back({inst.dist[n1][n2], n2});
+                    distances.push_back({inst.dist[n1][n2], n2});
                 }
             }
 
-            // Sortowanie sąsiadów po odległości
-            sort(closestNeighbors.begin(), closestNeighbors.end());
+            sort(distances.begin(), distances.end());
 
-            // Wybieramy 10 najbliższych
-            for (int i = 0; i < 10 && i < closestNeighbors.size(); i++) {
-                int n2 = closestNeighbors[i].second;
-                int delta = inst.deltaInsert(n1, n2, n2);
-                if (delta > 0) { // dodajemy tylko te ruchy, które poprawiają rozwiązanie
-                    candidateMoves.push_back({delta, {n1, n2}});
-                }
+            int lim = min(numCandidates, (int)distances.size());
+            candidateNearestNeighbors[n1].reserve(lim);
+            for (int i = 0; i < lim; i++) {
+                candidateNearestNeighbors[n1].push_back(distances[i].second);
             }
         }
+    }
 
-        // Sortowanie ruchów kandydackich według oceny (najpierw najlepsze)
-        sort(candidateMoves.begin(), candidateMoves.end(), greater<>());
+    Solution solve(const Instance& inst) override {
+        // 1. Prekalkulacja sąsiedztwa kandydackiego
+        if (candidateNearestNeighbors.empty() ||
+            (int)candidateNearestNeighbors.size() != inst.n ||
+            cachedNumCandidates != numCandidates) {
+            precomputeCandidateMoves(inst, numCandidates);
+            cachedNumCandidates = numCandidates;
+        }
 
-        // Wykonaj najlepsze dostępne ruchy kandydackie
-        for (auto& move : candidateMoves) {
-            int delta = move.first;
-            int n1 = move.second.first;
-            int n2 = move.second.second;
-
-            // Sprawdzamy, czy ten ruch jest możliwy i aplikujemy go
-            // Wstawiamy krawędź między n1 i n2 do cyklu
-            cyc.push_back(n2); // Prosty przykład dodania nowego wierzchołka
+        Solution sol = rndSol.solve(inst);
+        if (sol.cycle.empty()) {
             sol.computeStats(inst);
+            return sol;
         }
 
+        // Cykl przechowujemy jako listę dwukierunkową w tablicach next/prev.
+        //
+        // Dzięki temu:
+        // - ADD wykonujemy w O(1)
+        // - REMOVE wykonujemy w O(1)
+        //
+        // Vector<int> cyc będzie tylko chwilową linearyzacją cyklu, budowaną raz na iterację lokalnego przeszukiwania.
+        vector<int> next(inst.n, -1);
+        vector<int> prev(inst.n, -1);
+        vector<char> inCycle(inst.n, 0);
+
+        buildLinkedCycle(sol.cycle, next, prev, inCycle);
+
+        int startVertex = sol.cycle[0];
+        int cycleSize = (int)sol.cycle.size();
+        vector<int> position(inst.n, -1);
+
+        bool improved = true;
+
+        while (improved) {
+            improved = false;
+
+            int best_delta = 0;
+            MoveType best_type = MoveType::NONE;
+            int best_i = -1;
+            int best_j_or_v = -1;
+
+            vector<int> cyc = materializeCycle(startVertex, next, cycleSize);
+            int n = (int)cyc.size();
+
+            for (int i = 0; i < n; i++) {
+                position[cyc[i]] = i;
+            }
+
+            // ZBIERANIE RUCHÓW KANDYDACKICH 
+            for (int i = 0; i < n; i++) {
+                int n1 = cyc[i];
+                int n1_next = cyc[(i + 1) % n];
+                int n1_prev = cyc[(i - 1 + n) % n];
+
+                for (int n2 : candidateNearestNeighbors[n1]) {
+                    int j = inCycle[n2] ? position[n2] : -1;
+
+                    if (j != -1) {
+                        // RUCHY WEWNĄTRZTRASOWE
+                        if (i == j || i == (j + 1) % n || j == (i + 1) % n) continue;
+
+                        int n2_next = cyc[(j + 1) % n];
+                        int n2_prev = cyc[(j - 1 + n) % n];
+
+                        // RUCH 1:
+                        // Odwracamy fragment od n1_next do n2_prev.
+                        int delta1 =
+                            (inst.dist[n1][n1_next] + inst.dist[n2_prev][n2]) -
+                            (inst.dist[n1][n2_prev] + inst.dist[n1_next][n2]);
+
+                        if (delta1 > best_delta) {
+                            best_delta = delta1;
+                            best_type = MoveType::INTRA_1;
+                            best_i = i;
+                            best_j_or_v = j;
+                        }
+
+                        // RUCH 2:
+                        // Odwracamy fragment od n1 do n2.
+                        int delta2 =
+                            (inst.dist[n1_prev][n1] + inst.dist[n2][n2_next]) -
+                            (inst.dist[n1_prev][n2] + inst.dist[n1][n2_next]);
+
+                        if (delta2 > best_delta) {
+                            best_delta = delta2;
+                            best_type = MoveType::INTRA_2;
+                            best_i = i;
+                            best_j_or_v = j;
+                        }
+
+                    } else {
+                        // RUCHY MIĘDZYTRASOWE (ADD)
+
+                        // Opcja 1: wstaw n2 pomiędzy n1 a n1_next
+                        int d_add_next = inst.profit[n2] - inst.deltaInsert(n1, n1_next, n2);
+                        if (d_add_next > best_delta) {
+                            best_delta = d_add_next;
+                            best_type = MoveType::ADD_NEXT;
+                            best_i = i;
+                            best_j_or_v = n2;
+                        }
+
+                        // Opcja 2: wstaw n2 pomiędzy n1_prev a n1
+                        int d_add_prev = inst.profit[n2] - inst.deltaInsert(n1_prev, n1, n2);
+                        if (d_add_prev > best_delta) {
+                            best_delta = d_add_prev;
+                            best_type = MoveType::ADD_PREV;
+                            best_i = i;
+                            best_j_or_v = n2;
+                        }
+                    }
+                }
+            }
+
+            // ZBIERANIE RUCHÓW USUWANIA (REMOVE)
+            if (n > 2) {
+                for (int idx = 0; idx < n; idx++) {
+                    int prev_v = cyc[(idx - 1 + n) % n];
+                    int next_v = cyc[(idx + 1) % n];
+                    int v = cyc[idx];
+
+                    int d_rem = inst.deltaRemove(prev_v, v, next_v);
+                    if (d_rem > best_delta) {
+                        best_delta = d_rem;
+                        best_type = MoveType::REMOVE;
+                        best_i = idx;
+                    }
+                }
+            }
+
+            // APLIKACJA NAJLEPSZEGO RUCHU
+            if (best_delta > 0) {
+                improved = true;
+
+                if (best_type == MoveType::INTRA_1) {
+                    int start_rev = (best_i + 1) % n;
+                    int end_rev = (best_j_or_v - 1 + n) % n;
+
+                    reverseSubpath(cyc, start_rev, end_rev);
+                    rebuildLinkedCycleFromLinearOrder(cyc, next, prev);
+                    startVertex = cyc[0];
+
+                } else if (best_type == MoveType::INTRA_2) {
+                    reverseSubpath(cyc, best_i, best_j_or_v);
+                    rebuildLinkedCycleFromLinearOrder(cyc, next, prev);
+                    startVertex = cyc[0];
+
+                } else if (best_type == MoveType::ADD_NEXT) {
+                    int n1 = cyc[best_i];
+                    int old_next = next[n1];
+                    int v = best_j_or_v;
+
+                    insertBetween(n1, old_next, v, next, prev, inCycle);
+                    cycleSize++;
+
+                } else if (best_type == MoveType::ADD_PREV) {
+                    int n1 = cyc[best_i];
+                    int old_prev = prev[n1];
+                    int v = best_j_or_v;
+
+                    insertBetween(old_prev, n1, v, next, prev, inCycle);
+                    cycleSize++;
+
+                    if (n1 == startVertex) {
+                        startVertex = v;
+                    }
+
+                } else if (best_type == MoveType::REMOVE) {
+                    int v = cyc[best_i];
+                    int successor = next[v];
+
+                    removeVertex(v, next, prev, inCycle);
+                    cycleSize--;
+
+                    if (v == startVertex) {
+                        startVertex = successor;
+                    }
+                }
+            }
+        }
+
+        sol.cycle = materializeCycle(startVertex, next, cycleSize);
+        sol.computeStats(inst);
         return sol;
+    }
+
+private:
+    void buildLinkedCycle(const vector<int>& cyc,
+                          vector<int>& next,
+                          vector<int>& prev,
+                          vector<char>& inCycle) {
+        fill(next.begin(), next.end(), -1);
+        fill(prev.begin(), prev.end(), -1);
+        fill(inCycle.begin(), inCycle.end(), 0);
+
+        int n = (int)cyc.size();
+        for (int i = 0; i < n; i++) {
+            int v = cyc[i];
+            int vn = cyc[(i + 1) % n];
+            int vp = cyc[(i - 1 + n) % n];
+
+            next[v] = vn;
+            prev[v] = vp;
+            inCycle[v] = 1;
+        }
+    }
+
+    void rebuildLinkedCycleFromLinearOrder(const vector<int>& cyc,
+                                           vector<int>& next,
+                                           vector<int>& prev) {
+        int n = (int)cyc.size();
+        for (int i = 0; i < n; i++) {
+            int v = cyc[i];
+            next[v] = cyc[(i + 1) % n];
+            prev[v] = cyc[(i - 1 + n) % n];
+        }
+    }
+
+    vector<int> materializeCycle(int startVertex,
+                                 const vector<int>& next,
+                                 int cycleSize) {
+        vector<int> cyc;
+        cyc.reserve(cycleSize);
+
+        int v = startVertex;
+        for (int step = 0; step < cycleSize; step++) {
+            cyc.push_back(v);
+            v = next[v];
+        }
+
+        return cyc;
+    }
+
+    void insertBetween(int left, int right, int v,
+                       vector<int>& next,
+                       vector<int>& prev,
+                       vector<char>& inCycle) {
+        next[left] = v;
+        prev[v] = left;
+
+        next[v] = right;
+        prev[right] = v;
+
+        inCycle[v] = 1;
+    }
+
+    void removeVertex(int v,
+                      vector<int>& next,
+                      vector<int>& prev,
+                      vector<char>& inCycle) {
+        int left = prev[v];
+        int right = next[v];
+
+        next[left] = right;
+        prev[right] = left;
+
+        next[v] = -1;
+        prev[v] = -1;
+        inCycle[v] = 0;
+    }
+
+    void reverseSubpath(vector<int>& cyc, int start, int end) {
+        int n = (int)cyc.size();
+
+        if (start <= end) {
+            reverse(cyc.begin() + start, cyc.begin() + end + 1);
+        } else {
+            vector<int> temp;
+            temp.reserve(n - start + end + 1);
+
+            for (int k = start; k < n; k++) temp.push_back(cyc[k]);
+            for (int k = 0; k <= end; k++) temp.push_back(cyc[k]);
+
+            reverse(temp.begin(), temp.end());
+
+            int idx = 0;
+            for (int k = start; k < n; k++) cyc[k] = temp[idx++];
+            for (int k = 0; k <= end; k++) cyc[k] = temp[idx++];
+        }
     }
 };
 
@@ -829,88 +1209,171 @@ void saveAllCSV(const string& path, const vector<Solution>& sols, const vector<d
     }
 }
 
-int main(){
-    bool usePrecomputed=false;
+enum class SolverKind {
+    CLASSIC_LS,
+    MOVE_LIST_LS,
+    CANDIDATE_LS
+};
 
-    vector<Instance> insts={Instance::loadFromCSV("TSPA.csv",usePrecomputed),
-                            Instance::loadFromCSV("TSPB.csv",usePrecomputed)};
-    if(!usePrecomputed){ insts[0].saveDistanceCSV("TSPA_matrix.csv"); insts[1].saveDistanceCSV("TSPB_matrix.csv"); }
+struct MethodDef {
+    string name;
+    SolverKind kind;
+    NeighType nt;
+    LSMode mode;
+    bool startRandom;
+    int candidateCount;
+};
 
-    vector<string> tags={"A","B"};
+struct BenchmarkResult {
+    double avgObj = 0.0;
+    int minObj = 0;
+    int maxObj = 0;
 
-    struct MethodDef {
-        string name;
-        NeighType nt;
-        LSMode mode;
-        bool startRandom;
+    double avgTimeMs = 0.0;
+    double minTimeMs = 0.0;
+    double maxTimeMs = 0.0;
+
+    Solution best;
+    vector<Solution> allSols;
+    vector<double> timesSeconds;
+};
+
+unique_ptr<Heuristic> buildSolver(const MethodDef& def) {
+    if (def.kind == SolverKind::MOVE_LIST_LS) {
+        return make_unique<LocalSearchWithMoveList>();
+    }   
+    if (def.kind == SolverKind::CANDIDATE_LS) {
+        return make_unique<LocalSearchWithCandidateMoves>(def.candidateCount);
+    }
+    
+
+    return make_unique<LocalSearch>(def.nt, def.mode, def.startRandom);
+}
+
+BenchmarkResult runBenchmark(Heuristic& solver, const Instance& inst, int repetitions = 100) {
+    BenchmarkResult result;
+
+    vector<int> objs;
+    objs.reserve(repetitions);
+    result.timesSeconds.reserve(repetitions);
+    result.allSols.reserve(repetitions);
+
+    bool hasBest = false;
+
+    for (int rep = 0; rep < repetitions; rep++) {
+        auto t0 = chrono::steady_clock::now();
+        Solution s = solver.solve(inst);
+        double dt = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+
+        objs.push_back(s.objective());
+        result.timesSeconds.push_back(dt);
+        result.allSols.push_back(s);
+
+        if (!hasBest || s.objective() > result.best.objective()) {
+            result.best = s;
+            hasBest = true;
+        }
+    }
+
+    result.avgObj = accumulate(objs.begin(), objs.end(), 0.0) / objs.size();
+    result.minObj = *min_element(objs.begin(), objs.end());
+    result.maxObj = *max_element(objs.begin(), objs.end());
+
+    result.avgTimeMs = 1000.0 * accumulate(result.timesSeconds.begin(), result.timesSeconds.end(), 0.0) / result.timesSeconds.size();
+    result.minTimeMs = 1000.0 * (*min_element(result.timesSeconds.begin(), result.timesSeconds.end()));
+    result.maxTimeMs = 1000.0 * (*max_element(result.timesSeconds.begin(), result.timesSeconds.end()));
+
+    return result;
+}
+
+int main() {
+    bool usePrecomputed = false;
+    const int repetitions = 100;
+
+    vector<Instance> insts = {
+        Instance::loadFromCSV("TSPA.csv", usePrecomputed),
+        Instance::loadFromCSV("TSPB.csv", usePrecomputed)
     };
-    vector<MethodDef> lsDefs = {
-        {"LS_STEEPEST_ESWAP_RAND",   NeighType::EDGE_SWAP,   LSMode::STEEPEST, true},
-        {"LS_MOVE_LIST_RAND",   NeighType::EDGE_SWAP,   LSMode::STEEPEST, true},
-        {"LS_CANDIDATE_MOVES_RAND",   NeighType::EDGE_SWAP,   LSMode::STEEPEST, true},
 
+    if (!usePrecomputed) {
+        insts[0].saveDistanceCSV("TSPA_matrix.csv");
+        insts[1].saveDistanceCSV("TSPB_matrix.csv");
+    }
+
+    vector<string> tags = {"A", "B"};
+
+    // -------------------------------------------------------------------------
+    // Zestaw metod do porównania.
+    //
+    // LS_MOVE_LIST_RAND pomijamy na razie, zgodnie z Twoją uwagą.
+    // Candidate moves sprawdzamy dla trzech różnych długości sąsiedztwa.
+    // -------------------------------------------------------------------------
+    vector<MethodDef> methods = {
+        {"LS_STEEPEST_ESWAP_RAND",      SolverKind::CLASSIC_LS,   NeighType::EDGE_SWAP, LSMode::STEEPEST, true,  0},
+        {"LS_MOVE_LIST_RAND", SolverKind::MOVE_LIST_LS, NeighType::EDGE_SWAP, LSMode::STEEPEST, true, 0},
+        {"LS_CANDIDATE_MOVES_K10_RAND", SolverKind::CANDIDATE_LS, NeighType::EDGE_SWAP, LSMode::STEEPEST, true, 10},
+        {"LS_CANDIDATE_MOVES_K30_RAND", SolverKind::CANDIDATE_LS, NeighType::EDGE_SWAP, LSMode::STEEPEST, true, 30},
+        {"LS_CANDIDATE_MOVES_K50_RAND", SolverKind::CANDIDATE_LS, NeighType::EDGE_SWAP, LSMode::STEEPEST, true, 50},
+        {"LS_CANDIDATE_MOVES_K100_RAND", SolverKind::CANDIDATE_LS, NeighType::EDGE_SWAP, LSMode::STEEPEST, true, 100},
+        
     };
 
     makeDir("output");
 
-    for(size_t ii=0;ii<insts.size();ii++) {
+    for (size_t ii = 0; ii < insts.size(); ii++) {
         const auto& inst = insts[ii];
         string tag = tags[ii];
-        string base = "output/"+tag;
+        string base = "output/" + tag;
+
         makeDir(base);
-        makeDir(base+"/solutions");
-        makeDir(base+"/solutions_all");
+        makeDir(base + "/solutions");
+        makeDir(base + "/solutions_all");
 
-        double maxAvgTime = 0.0;
+        ofstream stats(base + "/stats.csv");
+        stats << "method,avg_obj,min_obj,max_obj,avg_time_ms,min_time_ms,max_time_ms\n";
 
-        ofstream stats(base+"/stats.csv");
-        stats<<"method,avg_obj,min_obj,max_obj,avg_time_ms,min_time_ms,max_time_ms\n";
-
+        // ---------------------------------------------------------------------
         // REGRET2
+        // ---------------------------------------------------------------------
         {
             Regret2 reg;
-            vector<int> objs; vector<double> times; vector<Solution> allSols;
-            Solution best; bool hasBest=false;
-            for(int rep=0;rep<100;rep++){
-                auto t0=chrono::steady_clock::now();
-                Solution s=reg.solve(inst);
-                double dt=chrono::duration<double>(chrono::steady_clock::now()-t0).count();
-                objs.push_back(s.objective()); times.push_back(dt);
-                allSols.push_back(s);
-                if(!hasBest||s.objective()>best.objective()){best=s;hasBest=true;}
-            }
-            double avgT=accumulate(times.begin(),times.end(),0.0)/times.size();
-            stats<<"REGRET2,"<<accumulate(objs.begin(),objs.end(),0.0)/objs.size()<<","
-                 <<*min_element(objs.begin(),objs.end())<<","<<*max_element(objs.begin(),objs.end())<<","
-                 <<avgT*1000<<","<<*min_element(times.begin(),times.end())*1000<<","<<*max_element(times.begin(),times.end())*1000<<"\n";
-            saveBest(base+"/solutions/REGRET2.txt",best);
-            saveAllCSV(base+"/solutions_all/REGRET2.csv",allSols,times);
+            BenchmarkResult res = runBenchmark(reg, inst, repetitions);
+
+            stats << "REGRET2,"
+                  << res.avgObj << ","
+                  << res.minObj << ","
+                  << res.maxObj << ","
+                  << res.avgTimeMs << ","
+                  << res.minTimeMs << ","
+                  << res.maxTimeMs << "\n";
+
+            saveBest(base + "/solutions/REGRET2.txt", res.best);
+            saveAllCSV(base + "/solutions_all/REGRET2.csv", res.allSols, res.timesSeconds);
+
             cerr << "[" << tag << "] REGRET2 done\n";
         }
 
-        // Local search
-        for(auto& def : lsDefs) {
-            LocalSearch ls(def.nt, def.mode, def.startRandom);
-            vector<int> objs; vector<double> times; vector<Solution> allSols;
-            Solution best; bool hasBest=false;
-            for(int rep=0;rep<100;rep++){   
-                auto t0=chrono::steady_clock::now();
-                Solution s=ls.solve(inst);
-                double dt=chrono::duration<double>(chrono::steady_clock::now()-t0).count();
-                objs.push_back(s.objective()); times.push_back(dt);
-                allSols.push_back(s);
-                if(!hasBest||s.objective()>best.objective()){best=s;hasBest=true;}
-            }
-            double avgT=accumulate(times.begin(),times.end(),0.0)/times.size();
-            if(avgT > maxAvgTime) maxAvgTime = avgT;
-            stats<<def.name<<","<<accumulate(objs.begin(),objs.end(),0.0)/objs.size()<<","
-                 <<*min_element(objs.begin(),objs.end())<<","<<*max_element(objs.begin(),objs.end())<<","
-                 <<avgT*1000<<","<<*min_element(times.begin(),times.end())*1000<<","<<*max_element(times.begin(),times.end())*1000<<"\n";
-            saveBest(base+"/solutions/"+def.name+".txt",best);
-            saveAllCSV(base+"/solutions_all/"+def.name+".csv",allSols,times);
+        // ---------------------------------------------------------------------
+        // Local Search / Candidate Moves
+        // ---------------------------------------------------------------------
+        for (const auto& def : methods) {
+            unique_ptr<Heuristic> solver = buildSolver(def);
+            BenchmarkResult res = runBenchmark(*solver, inst, repetitions);
 
-            cerr << "[" << tag << "] " << def.name << " avg_obj=" << accumulate(objs.begin(),objs.end(),0.0)/objs.size()
-                 << " avg_time=" << avgT*1000 << "ms\n";
+            stats << def.name << ","
+                  << res.avgObj << ","
+                  << res.minObj << ","
+                  << res.maxObj << ","
+                  << res.avgTimeMs << ","
+                  << res.minTimeMs << ","
+                  << res.maxTimeMs << "\n";
+
+            saveBest(base + "/solutions/" + def.name + ".txt", res.best);
+            saveAllCSV(base + "/solutions_all/" + def.name + ".csv", res.allSols, res.timesSeconds);
+
+            cerr << "[" << tag << "] " << def.name
+                 << " avg_obj=" << res.avgObj
+                 << " avg_time=" << res.avgTimeMs << "ms\n";
         }
     }
 

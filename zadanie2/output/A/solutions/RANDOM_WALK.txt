@@ -1,0 +1,7 @@
+objective=468
+profit=514
+length=46
+count=2
+cycle:
+107
+27

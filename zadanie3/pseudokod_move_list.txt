@@ -1,0 +1,326 @@
+Struktury danych
+- next[v] — następnik wierzchołka v w aktualnym cyklu
+- prev[v] — poprzednik wierzchołka v w aktualnym cyklu
+- inCycle[v] — informacja, czy wierzchołek v należy do aktualnego cyklu
+- startVertex — dowolny wierzchołek należący do cyklu, od którego rozpoczynamy linearyzację
+- MoveList — lista ruchów poprawiających uporządkowana od najgorszego do najlepszego
+- Move — pojedynczy ruch
+- Position[v] — pozycja wierzchołka v w chwilowej linearyzacji cyklu Cykl
+- EdgeSwapApplicability — stan aplikowalności ruchu EDGE_SWAP
+
+PROCEDURA BuildLinkedCycle(Cykl, next, prev, inCycle)
+    Dla każdego wierzchołka v:
+        next[v] = -1
+        prev[v] = -1
+        inCycle[v] = Fałsz
+
+    N = rozmiar(Cykl)
+
+    Dla każdego i od 0 do N - 1:
+        v  = Cykl[i]
+        vn = Cykl[(i + 1) MOD N]
+        vp = Cykl[(i - 1 + N) MOD N]
+
+        next[v] = vn
+        prev[v] = vp
+        inCycle[v] = Prawda
+
+
+FUNKCJA MaterializeCycle(startVertex, next, cycleSize)
+    Cykl = pusta lista
+    v = startVertex
+
+    Powtórz cycleSize razy:
+        Dodaj v do Cykl
+        v = next[v]
+
+    Zwróć Cykl
+
+
+PROCEDURA RebuildLinkedCycleFromLinearOrder(Cykl, next, prev)
+    N = rozmiar(Cykl)
+
+    Dla każdego i od 0 do N - 1:
+        v = Cykl[i]
+        next[v] = Cykl[(i + 1) MOD N]
+        prev[v] = Cykl[(i - 1 + N) MOD N]
+
+PROCEDURA InsertBetween(left, right, v, next, prev, inCycle)
+    next[left] = v
+    prev[v] = left
+
+    next[v] = right
+    prev[right] = v
+
+    inCycle[v] = Prawda
+
+
+PROCEDURA RemoveVertex(v, next, prev, inCycle)
+    left = prev[v]
+    right = next[v]
+
+    next[left] = right
+    prev[right] = left
+
+    next[v] = -1
+    prev[v] = -1
+    inCycle[v] = Fałsz
+
+
+ROCEDURA ReverseSubpath(Cykl, start, end)
+    Jeśli start <= end:
+        Odwróć kolejność elementów w Cykl od start do end
+    W przeciwnym wypadku:
+        Temp = []
+
+        Dla k od start do rozmiaru(Cykl) - 1:
+            Dodaj Cykl[k] do Temp
+
+        Dla k od 0 do end:
+            Dodaj Cykl[k] do Temp
+
+        Odwróć Temp
+
+        idx = 0
+
+        Dla k od start do rozmiaru(Cykl) - 1:
+            Cykl[k] = Temp[idx]
+            idx = idx + 1
+
+        Dla k od 0 do end:
+            Cykl[k] = Temp[idx]
+            idx = idx + 1
+
+FUNKCJA GetEdgeSwapApplicability(Ruch, next)
+    a = Ruch.a
+    b = Ruch.b
+    c = Ruch.c
+    d = Ruch.d
+
+    Jeśli next[a] == b ORAZ next[c] == d:
+        Zwróć FORWARD
+
+    Jeśli next[b] == a ORAZ next[d] == c:
+        Zwróć REVERSED
+
+    Zwróć NOT_APPLICABLE
+
+FUNKCJA IsApplicable(Ruch, next, prev, inCycle)
+    Jeśli Ruch.type == ADD:
+        left = Ruch.a
+        right = Ruch.b
+        v = Ruch.c
+
+        Jeśli inCycle[v] == Fałsz ORAZ next[left] == right:
+            Zwróć Prawda
+        W przeciwnym wypadku:
+            Zwróć Fałsz
+
+    Jeśli Ruch.type == REMOVE:
+        left = Ruch.a
+        v = Ruch.b
+        right = Ruch.c
+
+        Jeśli inCycle[v] == Prawda ORAZ prev[v] == left ORAZ next[v] == right:
+            Zwróć Prawda
+        W przeciwnym wypadku:
+            Zwróć Fałsz
+
+    Jeśli GetEdgeSwapApplicability(Ruch, next) != NOT_APPLICABLE:
+        Zwróć Prawda
+    W przeciwnym wypadku:
+        Zwróć Fałsz
+
+PROCEDURA BuildImprovingMoveList(Instancja, next, prev, inCycle, startVertex, cycleSize, MoveList)
+    Wyczyść MoveList
+
+    Cykl = MaterializeCycle(startVertex, next, cycleSize)
+    N = rozmiar(Cykl)
+
+    Position = tablica rozmiaru Instancja.n wypełniona -1
+    Dla każdego i od 0 do N - 1:
+        Position[Cykl[i]] = i
+
+    // ---------------------------------------------------------
+    // RUCHY MIĘDZYTRASOWE: ADD
+    // ---------------------------------------------------------
+    Outside = pusta lista
+
+    Dla każdego wierzchołka v od 0 do Instancja.n - 1:
+        Jeśli inCycle[v] == Fałsz:
+            Dodaj v do Outside
+
+    Dla każdego i od 0 do N - 1:
+        left = Cykl[i]
+        right = Cykl[(i + 1) MOD N]
+
+        Dla każdego v z Outside:
+            DeltaAdd = Profit[v] - (dist[left][v] + dist[v][right] - dist[left][right])
+
+            Jeśli DeltaAdd > 0:
+                Dodaj ruch:
+                    delta = DeltaAdd
+                    type = ADD
+                    a = left
+                    b = right
+                    c = v
+                do MoveList
+
+    // ---------------------------------------------------------
+    // RUCHY MIĘDZYTRASOWE: REMOVE
+    // ---------------------------------------------------------
+    Jeśli N > 2:
+        Dla każdego idx od 0 do N - 1:
+            left = Cykl[(idx - 1 + N) MOD N]
+            v = Cykl[idx]
+            right = Cykl[(idx + 1) MOD N]
+
+            DeltaRem = (dist[left][v] + dist[v][right] - dist[left][right]) - Profit[v]
+
+            Jeśli DeltaRem > 0:
+                Dodaj ruch:
+                    delta = DeltaRem
+                    type = REMOVE
+                    a = left
+                    b = v
+                    c = right
+                do MoveList
+
+    // ---------------------------------------------------------
+    // RUCHY WEWNĄTRZTRASOWE: EDGE_SWAP
+    // ---------------------------------------------------------
+    Dla każdego i od 0 do N - 2:
+        Dla każdego j od i + 2 do N - 1:
+            Jeśli i == 0 ORAZ j == N - 1:
+                Kontynuuj
+
+            a = Cykl[i]
+            b = Cykl[(i + 1) MOD N]
+            c = Cykl[j]
+            d = Cykl[(j + 1) MOD N]
+
+            DeltaSwap =
+                (dist[a][b] + dist[c][d]) -
+                (dist[a][c] + dist[b][d])
+
+            Jeśli DeltaSwap > 0:
+                Dodaj ruch:
+                    delta = DeltaSwap
+                    type = EDGE_SWAP
+                    a = a
+                    b = b
+                    c = c
+                    d = d
+                do MoveList
+
+    Posortuj MoveList rosnąco według delta
+    // dzięki temu najlepszy ruch będzie na końcu listy
+
+
+PROCEDURA ApplyEdgeSwapMove(Ruch, next, prev, startVertex, cycleSize)
+    Cykl = MaterializeCycle(startVertex, next, cycleSize)
+    N = rozmiar(Cykl)
+
+    Position = tablica rozmiaru liczby wierzchołków w instancji wypełniona -1
+    Dla każdego i od 0 do N - 1:
+        Position[Cykl[i]] = i
+
+    State = GetEdgeSwapApplicability(Ruch, next)
+
+    Jeśli State == NOT_APPLICABLE:
+        Zakończ procedurę
+
+    Jeśli State == FORWARD:
+        // usuwane krawędzie to (a,b) i (c,d)
+        i = Position[Ruch.a]
+        j = Position[Ruch.c]
+
+        start_rev = (i + 1) MOD N
+        end_rev = j
+
+    W przeciwnym wypadku jeśli State == REVERSED:
+        // usuwane krawędzie występują jako (b,a) i (d,c)
+        i = Position[Ruch.b]
+        j = Position[Ruch.d]
+
+        start_rev = (i + 1) MOD N
+        end_rev = j
+
+    ReverseSubpath(Cykl, start_rev, end_rev)
+    RebuildLinkedCycleFromLinearOrder(Cykl, next, prev)
+    startVertex = Cykl[0]
+
+
+PROCEDURA ApplyMove(Ruch, Instancja, next, prev, inCycle, startVertex, cycleSize)
+    Jeśli Ruch.type == ADD:
+        left = Ruch.a
+        right = Ruch.b
+        v = Ruch.c
+
+        InsertBetween(left, right, v, next, prev, inCycle)
+        cycleSize = cycleSize + 1
+        Zakończ procedurę
+
+    Jeśli Ruch.type == REMOVE:
+        v = Ruch.b
+        right = Ruch.c
+
+        RemoveVertex(v, next, prev, inCycle)
+        cycleSize = cycleSize - 1
+
+        Jeśli v == startVertex:
+            startVertex = right
+
+        Zakończ procedurę
+
+    Jeśli Ruch.type == EDGE_SWAP:
+        ApplyEdgeSwapMove(Ruch, next, prev, startVertex, cycleSize)
+
+
+FUNKCJA Solve(Instancja)
+    // 1. Rozwiązanie początkowe
+    Sol = GenerujLosoweRozwiązanie(Instancja)
+
+    Jeśli Sol.cycle jest pusty:
+        Oblicz statystyki Sol
+        Zwróć Sol
+
+    // 2. Reprezentacja cyklu jako lista dwukierunkowa
+    Utwórz tablice next, prev, inCycle
+    BuildLinkedCycle(Sol.cycle, next, prev, inCycle)
+
+    startVertex = Sol.cycle[0]
+    cycleSize = rozmiar(Sol.cycle)
+
+    // 3. Inicjalizacja listy ruchów poprawiających
+    BuildImprovingMoveList(Instancja, next, prev, inCycle, startVertex, cycleSize, MoveList)
+
+    // 4. Główna pętla lokalnego przeszukiwania
+    Dopóki Prawda:
+        Applied = Fałsz
+
+        // Przeglądanie listy ruchów od najlepszego do najgorszego
+        Dopóki MoveList nie jest pusta:
+            Ruch = ostatni element MoveList
+            Usuń ostatni element z MoveList
+
+            Jeśli IsApplicable(Ruch, next, prev, inCycle) == Fałsz:
+                Kontynuuj
+
+            ApplyMove(Ruch, Instancja, next, prev, inCycle, startVertex, cycleSize)
+            Applied = Prawda
+            Przerwij pętlę
+
+        // Jeżeli nie znaleziono ruchu aplikowalnego,
+        // budujemy listę ruchów od nowa dla bieżącego rozwiązania
+        Jeśli Applied == Fałsz:
+            BuildImprovingMoveList(Instancja, next, prev, inCycle, startVertex, cycleSize, MoveList)
+
+            Jeśli MoveList jest pusta:
+                Przerwij główną pętlę
+
+    // 5. Odtworzenie końcowego rozwiązania
+    Sol.cycle = MaterializeCycle(startVertex, next, cycleSize)
+    Oblicz statystyki Sol
+
+    Zwróć Sol
