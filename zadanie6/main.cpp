@@ -11,6 +11,7 @@
 #include <memory>
 #include <chrono>
 #include <climits>
+#include <set>
 
 using namespace std;
 
@@ -104,6 +105,8 @@ public:
     virtual Solution solve(const Instance& inst)=0;
     virtual ~Heuristic(){}
 };
+
+// --- Pomocnicze klasy (LS, Regret) ---
 
 class RandomSolution: public Heuristic {
 public:
@@ -412,6 +415,198 @@ private:
     }
 };
 
+// --- Klasa HAE ---
+
+class HAE : public Heuristic {
+    int opType; bool useLS; double timeLimitMs;
+    Regret2 repairAlgo; LocalSearchWithMoveList ls;
+
+public:
+    int iterationsCount = 0;
+    HAE(int op, bool ls_f, double lim) : opType(op), useLS(ls_f), timeLimitMs(lim) {}
+
+    Solution solve(const Instance& inst) override {
+        this->iterationsCount = 0;
+        vector<Solution> pop;
+        auto t0 = chrono::steady_clock::now();
+
+        // 1. Inicjalizacja populacji (Minima lokalne)
+        while (pop.size() < 20) {
+            Solution s = ls.solve(inst);
+            if (isUnique(pop, s)) pop.push_back(s);
+        }
+
+        // 2. Pętla ewolucyjna (Steady-state)
+        while (chrono::duration<double, milli>(chrono::steady_clock::now() - t0).count() < timeLimitMs) {
+            int i = rand() % 20, j;
+            do { j = rand() % 20; } while (i == j);
+
+            Solution child = combine(pop[i], pop[j], inst);
+            destroyMacro(inst, child);
+            // Naprawa metodą Regret (jak w LNS)
+            repairAlgo.repair(inst, child);
+            
+            // Opcjonalne Lokalne Przeszukiwanie
+            if (useLS) child = ls.solveFrom(inst, child);
+            else child.computeStats(inst);
+
+            this->iterationsCount++;
+
+            // Zastępowanie najgorszego
+            int worstIdx = 0;
+            for (int k = 1; k < 20; k++) {
+                if (pop[k].objective() < pop[worstIdx].objective()) worstIdx = k;
+            }
+
+            if (child.objective() > pop[worstIdx].objective() && isUnique(pop, child)) {
+                pop[worstIdx] = child;
+            }
+        }
+
+        Solution best = pop[0];
+        for (auto& s : pop) if (s.objective() > best.objective()) best = s;
+        return best;
+    }
+
+private:
+    bool isUnique(const vector<Solution>& pop, const Solution& s) {
+        for (const auto& p : pop) {
+            if (p.objective() == s.objective()) return false;
+        }
+        return true;
+    }
+
+    // Metoda pomocnicza: łączy rozłączne fragmenty w jeden cykl (losowo)
+    void connectSubpaths(vector<vector<int>>& paths, Solution& child) {
+        if (paths.empty()) return;
+        
+        // Losowa kolejność i orientacja podścieżek
+        shuffle(paths.begin(), paths.end(), rng);
+        for (auto& p : paths) {
+            if (rand() % 2) reverse(p.begin(), p.end());
+            for (int v : p) child.cycle.push_back(v);
+        }
+    }
+
+    Solution combine(const Solution& p1, const Solution& p2, const Instance& inst) {
+        Solution child;
+        
+        if (opType == 1) {
+            // OPERATOR 1: Wspólne wierzchołki i krawędzie (podścieżki)
+            set<pair<int, int>> edges2;
+            for (size_t i = 0; i < p2.cycle.size(); i++) {
+                int u = p2.cycle[i], v = p2.cycle[(i + 1) % p2.cycle.size()];
+                edges2.insert({min(u, v), max(u, v)});
+            }
+
+            vector<vector<int>> subpaths;
+            vector<int> currentPath;
+            for (size_t i = 0; i < p1.cycle.size(); i++) {
+                int u = p1.cycle[i], v = p1.cycle[(i + 1) % p1.cycle.size()];
+                currentPath.push_back(u);
+                if (edges2.find({min(u, v), max(u, v)}) == edges2.end()) {
+                    subpaths.push_back(currentPath);
+                    currentPath.clear();
+                }
+            }
+            if (!currentPath.empty()) subpaths.push_back(currentPath);
+            connectSubpaths(subpaths, child);
+
+        } else if (opType == 2) {
+            // OPERATOR 2: Usuwanie krawędzi i wierzchołków nieobecnych w p2
+            set<int> v2(p2.cycle.begin(), p2.cycle.end());
+            set<pair<int, int>> e2;
+            for (size_t i = 0; i < p2.cycle.size(); i++) {
+                e2.insert({min(p2.cycle[i], p2.cycle[(i+1)%p2.cycle.size()]), 
+                           max(p2.cycle[i], p2.cycle[(i+1)%p2.cycle.size()])});
+            }
+
+            vector<vector<int>> subpaths;
+            vector<int> currentPath;
+            for (size_t i = 0; i < p1.cycle.size(); i++) {
+                int u = p1.cycle[i], v = p1.cycle[(i+1)%p1.cycle.size()];
+                if (v2.count(u)) {
+                    currentPath.push_back(u);
+                    // Jeśli krawędź u-v nie istnieje w p2, kończymy podścieżkę
+                    if (e2.find({min(u, v), max(u, v)}) == e2.end()) {
+                        subpaths.push_back(currentPath);
+                        currentPath.clear();
+                    }
+                }
+            }
+            connectSubpaths(subpaths, child);
+
+        } else if (opType == 3) {
+            // OPERATOR 3: Usuwanie tylko wierzchołków nieobecnych w p2 (zachowanie krawędzi p1)
+            set<int> v2(p2.cycle.begin(), p2.cycle.end());
+            for (int v : p1.cycle) {
+                if (v2.count(v)) child.cycle.push_back(v);
+            }
+        }
+
+        // Zabezpieczenie przed pustym rozwiązaniem
+        if (child.cycle.empty()) {
+            child.cycle.push_back(p1.cycle[rand() % p1.cycle.size()]);
+        }
+        return child;
+    }
+    void destroyMacro(const Instance& inst, Solution& sol) {
+        int n_cyc = (int)sol.cycle.size();
+        int to_remove = max(2, (int)(n_cyc * uniform_real_distribution<double>(0.15, 0.45)(rng)));
+
+        int num_segments = 3;
+        int per_segment = to_remove / num_segments;
+
+        vector<bool> keep(inst.n, true);
+        vector<bool> removed_pos(n_cyc, false);
+        int total_removed = 0;
+
+        for (int s = 0; s < num_segments && total_removed < to_remove; s++) {
+            vector<int> candidates;
+            for (int i = 0; i < n_cyc; i++)
+                if (!removed_pos[i]) candidates.push_back(i);
+            if (candidates.empty()) break;
+
+            int start_pos = candidates[uniform_int_distribution<int>(0, (int)candidates.size()-1)(rng)];
+            int start_v = sol.cycle[start_pos];
+
+            // Shaw: posortuj pozostałe nieusunięte wierzchołki po podobieństwie do start_v
+            vector<pair<double, int>> similarity;
+            similarity.reserve(n_cyc - total_removed - 1);
+            for (int i = 0; i < n_cyc; i++) {
+                int v = sol.cycle[i];
+                if (!keep[v]) continue; // już usunięty
+                if (v == start_v) continue;
+                double sim = inst.dist[start_v][v] - abs(inst.profit[start_v] - inst.profit[v]);
+                similarity.push_back({sim, v});
+            }
+            sort(similarity.begin(), similarity.end());
+
+            // usuń start_v + per_segment-1 najbardziej podobnych
+            keep[start_v] = false;
+            removed_pos[start_pos] = true;
+            total_removed++;
+
+            for (int i = 0; i < per_segment - 1 && i < (int)similarity.size() && total_removed < to_remove; i++) {
+                int v = similarity[i].second;
+                keep[v] = false;
+                // oznacz pozycję w cyklu
+                for (int j = 0; j < n_cyc; j++)
+                    if (sol.cycle[j] == v) { removed_pos[j] = true; break; }
+                total_removed++;
+            }
+        }
+
+        vector<int> new_cyc;
+        new_cyc.reserve(n_cyc - total_removed);
+        for (int v : sol.cycle) if (keep[v]) new_cyc.push_back(v);
+        sol.cycle = new_cyc;
+        sol.computeStats(inst);
+    }
+};
+
+// --- Inne metody i Benchmark ---
+
 class MSLS : public Heuristic {
     LocalSearchWithMoveList ls;
     RandomSolution rndSol;
@@ -580,6 +775,7 @@ private:
 };
 
 
+// --- System zapisywania i Main ---
 
 void makeDir(const string& path) {
 #ifdef _WIN32
@@ -633,7 +829,9 @@ BenchmarkResult runBenchmark(Heuristic& solver, const Instance& inst, int repeti
         result.timesSeconds.push_back(dt);
         result.allSols.push_back(s);
 
-        if (auto* ils = dynamic_cast<ILS*>(&solver))
+        if (auto* h = dynamic_cast<HAE*>(&solver))
+            iters.push_back(h->iterationsCount);
+        else if (auto* ils = dynamic_cast<ILS*>(&solver))
             iters.push_back(ils->iterationsCount);
         else if (auto* lns = dynamic_cast<LNS*>(&solver))
             iters.push_back(lns->iterationsCount);
@@ -660,68 +858,37 @@ BenchmarkResult runBenchmark(Heuristic& solver, const Instance& inst, int repeti
     return result;
 }
 
+
 int main() {
-    bool usePrecomputed = false;
-    const int repetitions = 20;
-
-    vector<Instance> insts = {
-        Instance::loadFromCSV("TSPA.csv", usePrecomputed),
-        Instance::loadFromCSV("TSPB.csv", usePrecomputed)
-    };
-
+    vector<Instance> insts = { Instance::loadFromCSV("TSPA.csv"), Instance::loadFromCSV("TSPB.csv") };
     vector<string> tags = {"A", "B"};
     makeDir("output");
 
     for (size_t ii = 0; ii < insts.size(); ii++) {
-        const auto& inst = insts[ii];
-        string tag = tags[ii];
-        string base = "output/" + tag;
-
-        makeDir(base);
-        makeDir(base + "/solutions");
-        makeDir(base + "/solutions_all");
-
+        const auto& inst = insts[ii]; string tag = tags[ii]; string base = "output/" + tag;
+        makeDir(base); makeDir(base + "/solutions"); makeDir(base + "/solutions_all");
         ofstream stats(base + "/stats.csv");
-        stats << "method,avg_obj,min_obj,max_obj,avg_time_ms,min_time_ms,max_time_ms,avg_iter,min_iter,max_iter\n";
+        stats << "method,avg_obj,min_obj,max_obj,avg_time_ms,avg_iter,min_iter,max_iter\n";
 
-        MSLS msls;
-        BenchmarkResult resMSLS = runBenchmark(msls, inst, repetitions);
-        stats << "MSLS," << resMSLS.avgObj << "," << resMSLS.minObj << "," << resMSLS.maxObj << ","
-              << resMSLS.avgTimeMs << "," << resMSLS.minTimeMs << "," << resMSLS.maxTimeMs
-              << ",0,0,0\n";
-        saveBest(base + "/solutions/MSLS.txt", resMSLS.best);
-        saveAllCSV(base + "/solutions_all/MSLS.csv", resMSLS.allSols, resMSLS.timesSeconds);
-        cerr << "[" << tag << "] MSLS done. Avg time: " << resMSLS.avgTimeMs << "ms\n";
+        auto run = [&](Heuristic& s, string name) {
+            BenchmarkResult r = runBenchmark(s, inst);
+            stats << name << "," << r.avgObj << "," << r.minObj << "," << r.maxObj << "," << r.avgTimeMs << "," << r.avgIter << "," << r.minIter << "," << r.maxIter << "\n";
+            saveBest(base + "/solutions/" + name + ".txt", r.best);
+            saveAllCSV(base + "/solutions_all/" + name + ".csv", r.allSols, r.timesSeconds);
+            cout << "[" << tag << "] " << name << " done.\n";
+            return r.avgTimeMs;
+        };
 
-        double time_limit_ms = resMSLS.avgTimeMs;
+        MSLS msls; double limit = run(msls, "MSLS");
+        ILS ils(limit); run(ils, "ILS");
+        LNS lns(limit, true); run(lns, "LNS");
+        LNS lnsa(limit, false); run(lnsa, "LNSa");
 
-        ILS ils(time_limit_ms);
-        BenchmarkResult resILS = runBenchmark(ils, inst, repetitions);
-        stats << "ILS," << resILS.avgObj << "," << resILS.minObj << "," << resILS.maxObj << ","
-              << resILS.avgTimeMs << "," << resILS.minTimeMs << "," << resILS.maxTimeMs << ","
-              << resILS.avgIter << "," << resILS.minIter << "," << resILS.maxIter << "\n";
-        saveBest(base + "/solutions/ILS.txt", resILS.best);
-        saveAllCSV(base + "/solutions_all/ILS.csv", resILS.allSols, resILS.timesSeconds);
-        cerr << "[" << tag << "] ILS done. Avg iter: " << resILS.avgIter << "\n";
-
-        LNS lns(time_limit_ms, true);
-        BenchmarkResult resLNS = runBenchmark(lns, inst, repetitions);
-        stats << "LNS," << resLNS.avgObj << "," << resLNS.minObj << "," << resLNS.maxObj << ","
-              << resLNS.avgTimeMs << "," << resLNS.minTimeMs << "," << resLNS.maxTimeMs << ","
-              << resLNS.avgIter << "," << resLNS.minIter << "," << resLNS.maxIter << "\n";
-        saveBest(base + "/solutions/LNS.txt", resLNS.best);
-        saveAllCSV(base + "/solutions_all/LNS.csv", resLNS.allSols, resLNS.timesSeconds);
-        cerr << "[" << tag << "] LNS done. Avg iter: " << resLNS.avgIter << "\n";
-
-        LNS lnsa(time_limit_ms, false);
-        BenchmarkResult resLNSa = runBenchmark(lnsa, inst, repetitions);
-        stats << "LNSa," << resLNSa.avgObj << "," << resLNSa.minObj << "," << resLNSa.maxObj << ","
-              << resLNSa.avgTimeMs << "," << resLNSa.minTimeMs << "," << resLNSa.maxTimeMs << ","
-              << resLNSa.avgIter << "," << resLNSa.minIter << "," << resLNSa.maxIter << "\n";
-        saveBest(base + "/solutions/LNSa.txt", resLNSa.best);
-        saveAllCSV(base + "/solutions_all/LNSa.csv", resLNSa.allSols, resLNSa.timesSeconds);
-        cerr << "[" << tag << "] LNSa done. Avg iter: " << resLNSa.avgIter << "\n";
+        HAE h1(1, true, limit); run(h1, "HAE_Op1_LS");
+        HAE h2(2, true, limit); run(h2, "HAE_Op2_LS");
+        HAE h2n(2, false, limit); run(h2n, "HAE_Op2_noLS");
+        HAE h3(3, true, limit); run(h3, "HAE_Op3_LS");
+        HAE h3n(3, false, limit); run(h3n, "HAE_Op3_noLS");
     }
-
     return 0;
 }

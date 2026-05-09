@@ -15,7 +15,6 @@ using namespace std;
 
 mt19937 rng(random_device{}());
 
-// --- Twoje ENUMy i klasy bazowe ---
 enum class NeighType { VERTEX_SWAP, EDGE_SWAP };
 enum class LSMode    { STEEPEST, GREEDY };
 
@@ -76,7 +75,7 @@ public:
     }
 };
 
-// --- Funkcja wczytująca Twoje najlepsze rozwiązania ---
+// --- Funkcja wczytująca najlepsze rozwiązania ---
 Solution loadBestSolution(const string& filename, const Instance& inst) {
     ifstream in(filename);
     Solution sol; string line;
@@ -89,7 +88,6 @@ Solution loadBestSolution(const string& filename, const Instance& inst) {
     return sol;
 }
 
-// --- Twoja klasa LocalSearch (uproszczona pod wymogi zadania) ---
 class LocalSearch {
     NeighType nt;
 public:
@@ -105,7 +103,7 @@ public:
             vector<bool> inCycle(inst.n, false);
             for (int v : cyc) inCycle[v] = true;
 
-            // Kolejność ruchów: ADD, REMOVE, INTRA (uproszczone pod Greedy)
+            // Kolejność ruchów: ADD, REMOVE, INTRA 
             // 1. ADD
             for (int v = 0; v < inst.n && !improved; v++) {
                 if (inCycle[v]) continue;
