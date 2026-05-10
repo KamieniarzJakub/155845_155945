@@ -98,6 +98,34 @@ public:
         length = inst.cycleLength(cycle);
         profitSum = inst.cycleProfit(cycle);
     }
+
+    void phaseIIRemove(const Instance& inst, size_t min_size=3) {
+        list<int> cyc(cycle.begin(), cycle.end());
+        bool changed=true;
+        while(changed && cyc.size() > min_size) {
+            changed = false; 
+            int bestGain = 0; 
+            auto bestIt = cyc.begin();
+
+            for(auto it = cyc.begin(); it != cyc.end(); ++it) {
+                auto prev_it = (it == cyc.begin() ? prev(cyc.end()) : prev(it));
+                auto next_it = next(it); 
+                if(next_it == cyc.end()) next_it = cyc.begin();
+                
+                int delta = inst.deltaRemove(*prev_it, *it, *next_it);
+                if(delta > bestGain) { 
+                    bestGain = delta; 
+                    bestIt = it; 
+                }
+            }
+            if(bestGain > 0) { 
+                cyc.erase(bestIt); 
+                changed = true; 
+            }
+        }
+        cycle.assign(cyc.begin(), cyc.end());
+        computeStats(inst);
+    }
 };
 
 class Heuristic {
@@ -412,6 +440,102 @@ private:
         reverseSubpath(cyc, start_rev, end_rev);
         rebuildLinkedCycleFromLinearOrder(cyc, next, prev);
         startVertex = cyc[0];
+    }
+};
+
+
+
+class IteratedRegret : public Heuristic {
+    double time_limit_ms;
+public:
+    int iterationsCount = 0;
+    IteratedRegret(double limit) : time_limit_ms(limit) {}
+
+    Solution solve(const Instance& inst) override {
+        iterationsCount = 0;
+        auto t0 = chrono::steady_clock::now();
+        Solution best;
+        best.profitSum = -1e9; // Start z bardzo niskim wynikiem
+
+        while (chrono::duration<double, milli>(chrono::steady_clock::now() - t0).count() < time_limit_ms) {
+            int n = inst.n;
+            vector<bool> used(n, false);
+            int start = uniform_int_distribution<int>(0, n - 1)(rng);
+            list<int> cyc = {start};
+            used[start] = true;
+
+            // Szukanie drugiego wierzchołka
+            int nxt = -1, bestd = INT_MAX;
+            for(int v = 0; v < n; v++) 
+                if(!used[v] && inst.dist[start][v] < bestd) { bestd = inst.dist[start][v]; nxt = v; }
+            
+            cyc.push_back(nxt);
+            used[nxt] = true;
+
+            // Budowanie pełnego cyklu Hamiltona
+            while ((int)cyc.size() < n) {
+                double bestRG = -1e18;
+                int bestV = -1;
+
+                for(int v = 0; v < n; v++) {
+                    if(!used[v]) {
+                        vector<double> incs;
+                        for(auto it = cyc.begin(); it != cyc.end(); ++it) {
+                            auto next_it = next(it);
+                            if(next_it == cyc.end()) next_it = cyc.begin();
+                            incs.push_back(inst.deltaInsert(*it, *next_it, v));
+                        }
+                        sort(incs.begin(), incs.end());
+                        double rg = incs[1] - incs[0];
+                        if(rg > bestRG) { bestRG = rg; bestV = v; }
+                    }
+                }
+
+                double bestInc = 1e18;
+                auto bestPos = cyc.begin();
+                for(auto it = cyc.begin(); it != cyc.end(); ++it) {
+                    auto next_it = next(it);
+                    if(next_it == cyc.end()) next_it = cyc.begin();
+                    double inc = inst.deltaInsert(*it, *next_it, bestV);
+                    if(inc < bestInc) { bestInc = inc; bestPos = next_it; }
+                }
+                used[bestV] = true;
+                cyc.insert(bestPos, bestV);
+            }
+
+            Solution sol;
+            sol.cycle.assign(cyc.begin(), cyc.end());
+            sol.phaseIIRemove(inst); // Redukcja do najbardziej opłacalnego podzbioru
+
+            if (iterationsCount == 0 || sol.objective() > best.objective()) {
+                best = sol;
+            }
+            iterationsCount++;
+        }
+        return best;
+    }
+};
+
+// Wrapper dla pojedynczego LS, aby działał przez określony czas
+class IteratedLS : public Heuristic {
+    LocalSearchWithMoveList ls;
+    double time_limit_ms;
+public:
+    int iterationsCount = 0;
+    IteratedLS(double limit) : time_limit_ms(limit) {}
+
+    Solution solve(const Instance& inst) override {
+        iterationsCount = 0;
+        auto t0 = chrono::steady_clock::now();
+        Solution best;
+        best.profitSum = -1e9;
+
+        while (chrono::duration<double, milli>(chrono::steady_clock::now() - t0).count() < time_limit_ms) {
+            Solution s = ls.solve(inst); // solve() wewnątrz ma RandomSolution + LS
+            if (iterationsCount == 0 || s.objective() > best.objective()) best = s;
+            iterationsCount++;
+        }
+        return best;
     }
 };
 
@@ -835,6 +959,10 @@ BenchmarkResult runBenchmark(Heuristic& solver, const Instance& inst, int repeti
             iters.push_back(ils->iterationsCount);
         else if (auto* lns = dynamic_cast<LNS*>(&solver))
             iters.push_back(lns->iterationsCount);
+        else if (auto* ir = dynamic_cast<IteratedRegret*>(&solver))
+    iters.push_back(ir->iterationsCount);
+        else if (auto* ils_wrap = dynamic_cast<IteratedLS*>(&solver))
+            iters.push_back(ils_wrap->iterationsCount);
 
         if (!hasBest || s.objective() > result.best.objective()) {
             result.best = s; hasBest = true;
@@ -878,7 +1006,8 @@ int main() {
             cout << "[" << tag << "] " << name << " done.\n";
             return r.avgTimeMs;
         };
-
+        
+        
         MSLS msls; double limit = run(msls, "MSLS");
         ILS ils(limit); run(ils, "ILS");
         LNS lns(limit, true); run(lns, "LNS");
@@ -889,6 +1018,11 @@ int main() {
         HAE h2n(2, false, limit); run(h2n, "HAE_Op2_noLS");
         HAE h3(3, true, limit); run(h3, "HAE_Op3_LS");
         HAE h3n(3, false, limit); run(h3n, "HAE_Op3_noLS");
+        IteratedRegret ir(limit);
+        run(ir, "Regret2");
+
+        IteratedLS ils_wrap(limit);
+        run(ils_wrap, "LS_MOVE_LIST");
     }
     return 0;
 }
